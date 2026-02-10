@@ -334,41 +334,47 @@ def load_foret_zone() -> dict:
     """
     Charge les zones forestières depuis OpenStreetMap via Overpass API.
     Returns dict with 'rings' and 'bboxes' lists.
+    Utilise uniquement les ways (pas les relations qui sont trop lourdes).
     """
     bbox = (2.5, 43.55, 2.9, 43.85)
 
     overpass_url = "https://overpass-api.de/api/interpreter"
     overpass_query = f"""
-    [out:json][timeout:120];
+    [out:json][timeout:60];
     (
       way["landuse"="forest"]({bbox[1]},{bbox[0]},{bbox[3]},{bbox[2]});
       way["natural"="wood"]({bbox[1]},{bbox[0]},{bbox[3]},{bbox[2]});
-      relation["landuse"="forest"]({bbox[1]},{bbox[0]},{bbox[3]},{bbox[2]});
-      relation["natural"="wood"]({bbox[1]},{bbox[0]},{bbox[3]},{bbox[2]});
     );
     out geom;
     """
 
-    try:
-        response = requests.post(overpass_url, data={"data": overpass_query}, timeout=180)
-        response.raise_for_status()
-        data = response.json()
+    for attempt in range(3):
+        try:
+            response = requests.post(overpass_url, data={"data": overpass_query}, timeout=90)
+            response.raise_for_status()
+            data = response.json()
 
-        rings = []
-        bboxes = []
+            rings = []
+            bboxes = []
 
-        for element in data.get('elements', []):
-            if element['type'] == 'way' and 'geometry' in element:
-                coords = [(node['lon'], node['lat']) for node in element['geometry']]
-                if len(coords) >= 4 and coords[0] == coords[-1]:
-                    rings.append(coords)
-                    bboxes.append(polygon_bbox(coords))
+            for element in data.get('elements', []):
+                if element['type'] == 'way' and 'geometry' in element:
+                    coords = [(node['lon'], node['lat']) for node in element['geometry']]
+                    if len(coords) >= 4 and coords[0] == coords[-1]:
+                        rings.append(coords)
+                        bboxes.append(polygon_bbox(coords))
 
-        return {'rings': rings, 'bboxes': bboxes, 'count': len(rings)}
+            return {'rings': rings, 'bboxes': bboxes, 'count': len(rings)}
 
-    except Exception as e:
-        st.warning(f"Erreur chargement forêts: {e}")
-        return {'rings': [], 'bboxes': [], 'count': 0}
+        except Exception as e:
+            if attempt < 2:
+                import time
+                time.sleep(2 ** attempt)
+                continue
+            st.warning(f"Erreur chargement forêts: {e}")
+            return {'rings': [], 'bboxes': [], 'count': 0}
+
+    return {'rings': [], 'bboxes': [], 'count': 0}
 
 
 # ============================================================================
@@ -513,7 +519,7 @@ def display_results():
                     ).add_to(m)
 
         plugins.Fullscreen().add_to(m)
-        st_folium(m, width=None, height=500, use_container_width=True)
+        st_folium(m, width=None, height=500, use_container_width=True, returned_objects=[])
 
     with tab_tableau:
         display_cols = ['commune', 'id', 'section', 'numero', 'surface_ha']
@@ -725,7 +731,7 @@ def main():
             icon=folium.Icon(color='green', icon='info-sign')
         ).add_to(m)
 
-        st_folium(m, width=None, height=400, use_container_width=True)
+        st_folium(m, width=None, height=400, use_container_width=True, returned_objects=[])
 
     # Footer
     st.markdown("---")
