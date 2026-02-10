@@ -468,6 +468,119 @@ Pièce jointe : Liste des parcelles (optionnel)
 # MAIN APP
 # ============================================================================
 
+def display_results():
+    """Affiche les résultats stockés dans session_state."""
+    filtered = st.session_state['filtered']
+    water_features = st.session_state.get('water_features')
+
+    if filtered.empty:
+        st.warning("😕 Aucune parcelle ne correspond à tous les critères.")
+        st.info("""
+        **Suggestions :**
+        - Réduisez la surface minimum
+        - Désactivez le filtre forêt ou eau
+        - Sélectionnez plus de communes
+        """)
+        return
+
+    st.success(f"✅ **{len(filtered)}** parcelles correspondent à vos critères !")
+
+    tab_carte, tab_tableau, tab_export = st.tabs(["🗺️ Carte", "📋 Tableau", "📥 Export"])
+
+    with tab_carte:
+        center_lat = filtered['centroid_lat'].mean()
+        center_lon = filtered['centroid_lon'].mean()
+        m = folium.Map(location=[center_lat, center_lon], zoom_start=11, tiles='OpenStreetMap')
+
+        for _, row in filtered.iterrows():
+            folium.GeoJson(
+                row['geometry'],
+                style_function=lambda x: {
+                    'fillColor': '#228B22',
+                    'color': '#006400',
+                    'weight': 2,
+                    'fillOpacity': 0.5
+                },
+                tooltip=f"{row['commune']} - {row.get('id', 'N/A')} ({row['surface_ha']:.2f} ha)"
+            ).add_to(m)
+
+        if water_features:
+            for feat in water_features:
+                if feat['geom_type'] == 'line':
+                    folium.GeoJson(
+                        feat['geometry'],
+                        style_function=lambda x: {'color': '#1E90FF', 'weight': 2}
+                    ).add_to(m)
+
+        plugins.Fullscreen().add_to(m)
+        st_folium(m, width=None, height=500, use_container_width=True)
+
+    with tab_tableau:
+        display_cols = ['commune', 'id', 'section', 'numero', 'surface_ha']
+        display_cols = [c for c in display_cols if c in filtered.columns]
+        display_df = filtered[display_cols].copy()
+        display_df['surface_ha'] = display_df['surface_ha'].round(2)
+
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Parcelles", len(filtered))
+        with col2:
+            st.metric("Surface totale", f"{filtered['surface_ha'].sum():.1f} ha")
+        with col3:
+            st.metric("Surface moyenne", f"{filtered['surface_ha'].mean():.1f} ha")
+
+    with tab_export:
+        st.subheader("📥 Téléchargements")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            excel_data = create_excel_export(filtered)
+            st.download_button(
+                label="📊 Télécharger Excel",
+                data=excel_data,
+                file_name=f"parcelles_lacaune_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
+        with col2:
+            geojson_str = create_geojson_export(filtered)
+            st.download_button(
+                label="🗺️ Télécharger GeoJSON",
+                data=geojson_str,
+                file_name=f"parcelles_lacaune_{datetime.now().strftime('%Y%m%d')}.geojson",
+                mime="application/json"
+            )
+
+        st.markdown("---")
+        st.subheader("📄 Courriers Mairies")
+
+        communes_with_parcelles = filtered['commune'].unique()
+
+        selected_commune_courrier = st.selectbox(
+            "Sélectionnez une commune",
+            options=communes_with_parcelles
+        )
+
+        if selected_commune_courrier:
+            parcelles_commune = filtered[filtered['commune'] == selected_commune_courrier]
+            courrier = generate_courrier_mairie(
+                selected_commune_courrier,
+                parcelles_commune
+            )
+
+            st.text_area("Courrier type", value=courrier, height=400)
+
+            st.download_button(
+                label=f"📄 Télécharger courrier {selected_commune_courrier}",
+                data=courrier,
+                file_name=f"courrier_{selected_commune_courrier.replace(' ', '_')}.txt",
+                mime="text/plain"
+            )
+
+
 def main():
     # En-tête
     st.title("🏔️ Prospecteur Foncier")
@@ -513,10 +626,9 @@ def main():
 
     search_button = st.sidebar.button("🔍 Rechercher", type="primary", use_container_width=True)
 
-    # Zone principale
+    # Lancer la recherche et stocker les résultats dans session_state
     if search_button and selected_communes:
 
-        # Chargement des données
         with st.spinner("Chargement des données..."):
 
             all_parcelles = []
@@ -536,7 +648,6 @@ def main():
             df = pd.DataFrame(all_parcelles)
             st.info(f"📊 {len(df)} parcelles chargées pour {len(selected_communes)} communes")
 
-            # Données complémentaires
             foret_data = None
             water_features = None
 
@@ -556,14 +667,11 @@ def main():
                     st.warning("⚠️ Données hydrographiques non disponibles - filtre désactivé")
                     require_water = False
 
-        # Filtrage
         with st.spinner("Application des filtres..."):
 
-            # Filtre surface
             filtered = df[df['surface_ha'] >= min_surface].copy()
             st.write(f"Après filtre surface ≥ {min_surface} ha : **{len(filtered)}** parcelles")
 
-            # Filtre forêt
             if require_forest and foret_data and foret_data['count'] > 0 and not filtered.empty:
                 forest_mask = []
                 for _, row in filtered.iterrows():
@@ -580,7 +688,6 @@ def main():
                 filtered = filtered[forest_mask]
                 st.write(f"Après filtre forêt : **{len(filtered)}** parcelles")
 
-            # Filtre eau
             if require_water and water_features and not filtered.empty:
                 water_mask = []
                 for _, row in filtered.iterrows():
@@ -593,114 +700,15 @@ def main():
                 filtered = filtered[water_mask]
                 st.write(f"Après filtre eau : **{len(filtered)}** parcelles")
 
-        # Résultats
+        # Stocker les résultats dans session_state
+        st.session_state['filtered'] = filtered
+        st.session_state['water_features'] = water_features
+        st.session_state['has_results'] = True
+
+    # Afficher les résultats (depuis session_state, survit aux rechargements)
+    if st.session_state.get('has_results'):
         st.markdown("---")
-
-        if filtered.empty:
-            st.warning("😕 Aucune parcelle ne correspond à tous les critères.")
-            st.info("""
-            **Suggestions :**
-            - Réduisez la surface minimum
-            - Désactivez le filtre forêt ou eau
-            - Sélectionnez plus de communes
-            """)
-        else:
-            st.success(f"✅ **{len(filtered)}** parcelles correspondent à vos critères !")
-
-            tab_carte, tab_tableau, tab_export = st.tabs(["🗺️ Carte", "📋 Tableau", "📥 Export"])
-
-            with tab_carte:
-                center_lat = filtered['centroid_lat'].mean()
-                center_lon = filtered['centroid_lon'].mean()
-                m = folium.Map(location=[center_lat, center_lon], zoom_start=11, tiles='OpenStreetMap')
-
-                for _, row in filtered.iterrows():
-                    folium.GeoJson(
-                        row['geometry'],
-                        style_function=lambda x: {
-                            'fillColor': '#228B22',
-                            'color': '#006400',
-                            'weight': 2,
-                            'fillOpacity': 0.5
-                        },
-                        tooltip=f"{row['commune']} - {row.get('id', 'N/A')} ({row['surface_ha']:.2f} ha)"
-                    ).add_to(m)
-
-                if water_features:
-                    for feat in water_features:
-                        if feat['geom_type'] == 'line':
-                            folium.GeoJson(
-                                feat['geometry'],
-                                style_function=lambda x: {'color': '#1E90FF', 'weight': 2}
-                            ).add_to(m)
-
-                plugins.Fullscreen().add_to(m)
-                st_folium(m, width=None, height=500, use_container_width=True)
-
-            with tab_tableau:
-                display_cols = ['commune', 'id', 'section', 'numero', 'surface_ha']
-                display_cols = [c for c in display_cols if c in filtered.columns]
-                display_df = filtered[display_cols].copy()
-                display_df['surface_ha'] = display_df['surface_ha'].round(2)
-
-                st.dataframe(display_df, use_container_width=True, hide_index=True)
-
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Parcelles", len(filtered))
-                with col2:
-                    st.metric("Surface totale", f"{filtered['surface_ha'].sum():.1f} ha")
-                with col3:
-                    st.metric("Surface moyenne", f"{filtered['surface_ha'].mean():.1f} ha")
-
-            with tab_export:
-                st.subheader("📥 Téléchargements")
-
-                col1, col2 = st.columns(2)
-
-                with col1:
-                    excel_data = create_excel_export(filtered)
-                    st.download_button(
-                        label="📊 Télécharger Excel",
-                        data=excel_data,
-                        file_name=f"parcelles_lacaune_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-
-                with col2:
-                    geojson_str = create_geojson_export(filtered)
-                    st.download_button(
-                        label="🗺️ Télécharger GeoJSON",
-                        data=geojson_str,
-                        file_name=f"parcelles_lacaune_{datetime.now().strftime('%Y%m%d')}.geojson",
-                        mime="application/json"
-                    )
-
-                st.markdown("---")
-                st.subheader("📄 Courriers Mairies")
-
-                communes_with_parcelles = filtered['commune'].unique()
-
-                selected_commune_courrier = st.selectbox(
-                    "Sélectionnez une commune",
-                    options=communes_with_parcelles
-                )
-
-                if selected_commune_courrier:
-                    parcelles_commune = filtered[filtered['commune'] == selected_commune_courrier]
-                    courrier = generate_courrier_mairie(
-                        selected_commune_courrier,
-                        parcelles_commune
-                    )
-
-                    st.text_area("Courrier type", value=courrier, height=400)
-
-                    st.download_button(
-                        label=f"📄 Télécharger courrier {selected_commune_courrier}",
-                        data=courrier,
-                        file_name=f"courrier_{selected_commune_courrier.replace(' ', '_')}.txt",
-                        mime="text/plain"
-                    )
+        display_results()
 
     elif not selected_communes:
         st.info("👆 Sélectionnez au moins une commune dans la barre latérale pour commencer.")
